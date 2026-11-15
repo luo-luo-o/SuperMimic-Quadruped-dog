@@ -99,36 +99,60 @@ def add_shank_collisions(calf: ET.Element, leg: str, source: ET.Element,
             fromto=fmt(local.ravel()), size=cylinder.get('radius'), rgba='0.5 0.5 0.5 0.2')
 
 
+def transform_inertial(link: ET.Element, source_pose, target_pose):
+    """Express the CAD center of mass and its inertia tensor in the new link frame."""
+    tr, tp = target_pose
+    sr, sp = source_pose
+    inertial = link.find('inertial')
+    mass = float(inertial.find('mass').get('value'))
+    ir, ip = pose(inertial.find('origin'))
+    com = tr.T @ (R @ (sr @ ip + sp - C) - tp)
+    values = {key: float(value) for key, value in inertial.find('inertia').attrib.items()}
+    source_inertia = np.array([
+        [values['ixx'], values['ixy'], values['ixz']],
+        [values['ixy'], values['iyy'], values['iyz']],
+        [values['ixz'], values['iyz'], values['izz']],
+    ])
+    rotation = tr.T @ R @ sr @ ir
+    return mass, com, rotation @ source_inertia @ rotation.T
+
+
+def add_full_inertial(body: ET.Element, mass: float, center: np.ndarray, inertia: np.ndarray):
+    # The CAD axes are rounded; remove numerical residue in effectively zero cross terms.
+    full = (*inertia.diagonal(), inertia[0, 1], inertia[0, 2], inertia[1, 2])
+    add(body, 'inertial', pos=fmt(center), mass=f'{mass:.7g}',
+        fullinertia=fmt(0.0 if abs(value) < 1e-12 else value for value in full))
+
+
 def merged_calf_inertial(source_links: dict[str, ET.Element],
                          source_poses: dict[str, tuple[np.ndarray, np.ndarray]],
                          shank_name: str, foot_name: str,
                          target_pose: tuple[np.ndarray, np.ndarray]):
     """Transform CAD shank/foot inertias to the new calf frame and merge them."""
-    tr, tp = target_pose
-    parts = []
-    for name in (shank_name, foot_name):
-        link = source_links[name]
-        inertial = link.find('inertial')
-        mass = float(inertial.find('mass').get('value'))
-        _, source_com = pose(inertial.find('origin'))
-        sr, sp = source_poses[name]
-        com = ((sr @ source_com + sp - C) @ R.T - tp) @ tr
-        values = {key: float(value) for key, value in inertial.find('inertia').attrib.items()}
-        source_inertia = np.array([
-            [values['ixx'], values['ixy'], values['ixz']],
-            [values['ixy'], values['iyy'], values['iyz']],
-            [values['ixz'], values['iyz'], values['izz']],
-        ])
-        rotation = tr.T @ R @ sr
-        parts.append((mass, com, rotation @ source_inertia @ rotation.T))
+    parts = [
+        transform_inertial(source_links[name], source_poses[name], target_pose)
+        for name in (shank_name, foot_name)
+    ]
     total_mass = sum(mass for mass, _, _ in parts)
     center = sum(mass * com for mass, com, _ in parts) / total_mass
     inertia = np.zeros((3, 3))
     for mass, com, own_inertia in parts:
         delta = com - center
         inertia += own_inertia + mass * (np.dot(delta, delta) * np.eye(3) - np.outer(delta, delta))
-    full = inertia[0, 0], inertia[1, 1], inertia[2, 2], inertia[0, 1], inertia[0, 2], inertia[1, 2]
-    return total_mass, center, full
+    return total_mass, center, inertia
+
+
+def add_thigh_collisions(thigh: ET.Element, leg: str, side_sign: int):
+    """Approximate the two CAD side plates and their thin transverse brace."""
+    rgba = '0.5 0.5 0.5 0.2'
+    # Measured in the corrected thigh STL: 8 mm plates centered at y=3.8 and
+    # -58 mm on the left, with x half-widths of 10–15 mm and z midpoint -60 mm.
+    for name, y in (('outer', 0.0038), ('inner', -0.058)):
+        add(thigh, 'geom', name=f'{leg}_thigh_{name}_collision', type='box',
+            pos=fmt((0, side_sign * y, -0.060)), size='0.012 0.004 0.070', rgba=rgba)
+    add(thigh, 'geom', name=f'{leg}_thigh_brace_collision', type='cylinder',
+        fromto=fmt((0, side_sign * -0.058, -0.060, 0, side_sign * 0.0038, -0.060)),
+        size='0.004', rgba=rgba)
 
 
 def fmt(v):
@@ -158,10 +182,8 @@ def build():
     add(trunk, 'geom', name='trunk_collision', type='box', size='0.184 0.112 0.031', pos='0 0 0.0115', contype='1', conaffinity='1', rgba='0.7 0.7 0.7 0.25')
     add(trunk, 'geom', name='trunk_visual', type='mesh', mesh='main_body_1', contype='0', conaffinity='0', rgba='0.7 0.7 0.7 1')
     contact = add(model, 'contact')
-    # The proximal thigh capsules overlap the trunk shell at the hip cutouts.
-    # These are connected assembly parts, so their mutual collision is excluded.
-    # Masses are CAD values; positive-definite inertias are box/rod estimates at each COM.
-    # Original off-diagonal and principal values were inconsistent with the corrected axes.
+    # The coarse trunk box fills the hip cutouts. Exclude contact there between
+    # connected assembly parts.
     for leg, side, fore in [('FL','left','front'),('FR','right','front'),('RL','left','after'),('RR','right','after')]:
         sign = 1 if side == 'left' else -1
         shoulder_name = f'{side}_{fore}_shoulder_1'
@@ -180,6 +202,7 @@ def build():
         lower = float(np.linalg.norm(knee_to_foot[[0, 2]]))
         thigh_angle = float(np.arctan2(-thigh_to_knee[0], -thigh_to_knee[2]))
         calf_angle = float(np.arctan2(-knee_to_foot[0], -knee_to_foot[2]) - thigh_angle)
+        thigh_pose = Rotation.from_euler('y', thigh_angle).as_matrix(), thigh_pos
         # The CAD left/right foot offsets differ by 0.7 mm. Use their mean to
         # preserve exact reflection for mirrored motions (0.35 mm per side).
         foot_local_target = (0.0, -sign * 0.027151, -lower)
@@ -190,9 +213,9 @@ def build():
         add(hip, 'geom', name=f'{leg}_hip_visual', type='mesh', mesh=f'{side}_{fore}_shoulder_1', contype='0', conaffinity='0')
         thigh = add(hip, 'body', name=f'{leg}_thigh', pos=fmt(thigh_offset))
         add(thigh, 'joint', name=f'{leg}_thigh_joint', type='hinge', axis='0 1 0', range='-1.5 2.5', damping='0.02', armature='0.01')
-        add(thigh, 'inertial', pos='0 0 -0.075', mass='0.068327', diaginertia='0.00013 0.00013 0.00003')
+        add_full_inertial(thigh, *transform_inertial(source_links[thigh_name], source_poses[thigh_name], thigh_pose))
         add(thigh, 'geom', name=f'{leg}_thigh_visual', type='mesh', mesh=f'{side}_{fore}_thigh_1', contype='0', conaffinity='0')
-        add(thigh, 'geom', name=f'{leg}_thigh_collision', type='capsule', fromto=fmt((0,0,-0.012,0,0,-upper+0.012)), size='0.014', rgba='0.5 0.5 0.5 0.2')
+        add_thigh_collisions(thigh, leg, sign)
         calf = add(thigh, 'body', name=f'{leg}_calf', pos=fmt((0,0,-upper)))
         add(calf, 'joint', name=f'{leg}_calf_joint', type='hinge', axis='0 1 0', range='-2.6 -0.05', damping='0.02', armature='0.01')
         add(calf, 'geom', name=f'{leg}_calf_visual', type='mesh', mesh=f'{side}_{fore}_shank_1', contype='0', conaffinity='0')
@@ -200,11 +223,8 @@ def build():
         add(calf, 'site', name=leg, pos=fmt(foot_local_target), size='0.004')
         # Target body poses at the standing pose, in trunk coordinates.
         hip_pose = np.eye(3), hip_pos
-        thigh_rot = Rotation.from_euler('y', thigh_angle).as_matrix()
-        thigh_pose = thigh_rot, thigh_pos
         calf_pose = Rotation.from_euler('y', thigh_angle + calf_angle).as_matrix(), knee_pos
-        mass, center, full_inertia = merged_calf_inertial(source_links, source_poses, shank_name, foot_name, calf_pose)
-        add(calf, 'inertial', pos=fmt(center), mass=f'{mass:.7g}', fullinertia=fmt(full_inertia))
+        add_full_inertial(calf, *merged_calf_inertial(source_links, source_poses, shank_name, foot_name, calf_pose))
         add_shank_collisions(calf, leg, source_links[shank_name], source_poses[shank_name], calf_pose)
         for part, target in [('shoulder', hip_pose), ('thigh', thigh_pose), ('shank', calf_pose)]:
             name = f'{side}_{fore}_{part}_1'
@@ -219,6 +239,21 @@ def write_urdf(model):
     """Companion URDF with the same corrected frames, meshes, masses and joint limits."""
     robot = ET.Element('robot', name='dog')
     root = model.find('./worldbody/body')
+
+    def write_trunk_collisions(link, geom):
+        # URDF has no link-pair exclusions. Leave the four CAD hip openings
+        # clear while keeping the trunk box's overall extents.
+        hx, hy, hz = np.fromstring(geom.get('size'), sep=' ')
+        x, y, z = np.fromstring(geom.get('pos'), sep=' ')
+        cutout_x, cutout_y = 0.126, 0.046
+        pieces = [('center', y, 2 * hx, 2 * cutout_y)]
+        for name, sign in (('left', 1), ('right', -1)):
+            pieces.append((name, y + sign * (cutout_y + hy) / 2, 2 * cutout_x, hy - cutout_y))
+        for name, center_y, length, width in pieces:
+            collision = add(link, 'collision', name=f'trunk_{name}_collision')
+            add(collision, 'origin', xyz=fmt((x, center_y, z)), rpy='0 0 0')
+            add(add(collision, 'geometry'), 'box', size=fmt((length, width, 2 * hz)))
+
     def visit(body, parent=None):
         name = body.get('name')
         link = add(robot, 'link', name=name)
@@ -238,9 +273,11 @@ def write_urdf(model):
                 add(visual, 'origin', xyz='0 0 0', rpy='0 0 0')
                 geometry = add(visual, 'geometry')
                 add(geometry, 'mesh', filename=f"meshes/{geom.get('mesh')}.stl")
+            elif geom.get('name') == 'trunk_collision':
+                write_trunk_collisions(link, geom)
             elif geom.get('name','').endswith('_collision'):
                 collision = add(link, 'collision', name=geom.get('name'))
-                if geom.get('type') == 'capsule':
+                if geom.get('type') in ('capsule', 'cylinder'):
                     points = np.fromstring(geom.get('fromto'), sep=' ').reshape(2,3)
                     center = points.mean(0)
                     length = float(np.linalg.norm(points[1]-points[0]))

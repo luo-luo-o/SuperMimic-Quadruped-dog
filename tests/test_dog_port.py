@@ -38,6 +38,31 @@ def test_curved_calf_center_of_mass_uses_cad_offset():
         assert float(urdf_link.find('inertial/inertia').get('ixz')) != 0
 
 
+def test_thigh_cad_inertia_and_fork_collisions_match_in_both_formats():
+    for path in (XML, XML.with_suffix('.urdf')):
+        model = mujoco.MjModel.from_xml_path(str(path))
+        for leg in ('FL', 'FR', 'RL', 'RR'):
+            side = 1 if leg.endswith('L') else -1
+            thigh = model.body(f'{leg}_thigh')
+            np.testing.assert_allclose(thigh.ipos, [0.000046, -side * 0.02727, -0.06005], atol=5e-6)
+            axes = Rotation.from_quat(thigh.iquat, scalar_first=True).as_matrix()
+            inertia = axes @ np.diag(thigh.inertia) @ axes.T
+            np.testing.assert_allclose(inertia, np.diag([0.000171, 0.000117, 0.000061]), atol=1e-9)
+
+            for plate, y in (('outer', 0.0038), ('inner', -0.058)):
+                geom = model.geom(f'{leg}_thigh_{plate}_collision')
+                assert geom.type[0] == mujoco.mjtGeom.mjGEOM_BOX
+                np.testing.assert_allclose(geom.pos, [0, side * y, -0.060], atol=1e-7)
+                np.testing.assert_allclose(geom.size, [0.012, 0.004, 0.070], atol=1e-7)
+
+            brace = model.geom(f'{leg}_thigh_brace_collision')
+            assert brace.type[0] == mujoco.mjtGeom.mjGEOM_CYLINDER
+            np.testing.assert_allclose(brace.pos, [0, -side * 0.0271, -0.060], atol=1e-7)
+            np.testing.assert_allclose(brace.size[:2], [0.004, 0.0309], atol=1e-7)
+            axis = Rotation.from_quat(brace.quat, scalar_first=True).apply([0, 0, 1])
+            np.testing.assert_allclose(np.abs(axis), [0, 1, 0], atol=1e-6)
+
+
 def test_dog_stance_and_actuation():
     quad = load_robot('dog')
     assert quad.nominal_root_height() == pytest.approx(0.2235682548163149)
@@ -112,13 +137,16 @@ def test_urdf_and_mjcf_joint_centers_match(at_home):
             assert np.allclose(mjdata.xpos[mjid] - [0, 0, STAND_Z], urdata.xpos[urid], atol=1e-8)
 
 
-def test_dog_home_has_no_self_collision():
+@pytest.mark.parametrize('suffix', ['.xml', '.urdf'])
+def test_dog_home_has_no_self_collision(suffix):
     from supermimic.robots.dog import HOME, JOINT_NAMES, STAND_Z
 
-    model = mujoco.MjModel.from_xml_path(str(XML))
+    model = mujoco.MjModel.from_xml_path(str(XML.with_suffix(suffix)))
     data = mujoco.MjData(model)
-    data.qpos[:7] = [0, 0, STAND_Z, 1, 0, 0, 0]
-    data.qpos[7:] = [HOME[name] for name in JOINT_NAMES]
+    if suffix == '.xml':
+        data.qpos[:7] = [0, 0, STAND_Z, 1, 0, 0, 0]
+    for name in JOINT_NAMES:
+        data.qpos[model.joint(name).qposadr[0]] = HOME[name]
     mujoco.mj_forward(model, data)
     assert data.ncon == 0
 
