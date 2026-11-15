@@ -34,7 +34,7 @@ def _paint(spec: mujoco.MjSpec, rgba, foot_rgba, group: int) -> None:
     mat = spec.add_material(name="body")
     mat.specular, mat.shininess, mat.emission = 0.6, 0.7, 0.25
     for g in spec.geoms:
-        if g.group == 1:
+        if g.group == 1 or (g.type == mujoco.mjtGeom.mjGEOM_MESH and g.contype == 0 and g.conaffinity == 0):
             g.rgba, g.material, g.group = rgba, "body", group
         elif g.name.endswith("_foot_collision"):
             g.rgba, g.group = foot_rgba, group

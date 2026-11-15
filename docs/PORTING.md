@@ -10,9 +10,10 @@ the training how the robot is actuated, randomised and scored. The Rover X1 has 
 ## 1. Retargeting (dog motions → your robot)
 
 Supported: 12-DoF quadrupeds whose MJCF has a free-floating trunk and, per leg, an abduction hinge about +x at
-the hip body origin, a thigh hinge about +y offset only sideways from it, a calf hinge about +y straight below
-the thigh joint and a foot site straight below the calf joint (Rover X1, Unitree Go1 / Go2 / A1 and most
-others). `load_robot` checks every one of these and names the joint or site that does not fit.
+the hip body origin, a thigh hinge about +y with a fixed x/y/z offset from it, a calf hinge about +y straight
+below the thigh joint, and a foot site below the calf joint with an optional lateral offset. The foot site
+must have zero fore-aft offset in its calf frame. This includes Rover X1, Unitree Go1 / Go2 / A1 and the
+ported CAD dog. `load_robot` checks these constraints and names the joint or site that does not fit.
 
 Write `configs/robots/<name>.yaml`:
 

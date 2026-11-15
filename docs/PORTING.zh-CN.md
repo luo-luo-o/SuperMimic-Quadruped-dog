@@ -8,9 +8,10 @@ Rover X1 两个都有（`configs/robots/rover.yaml`、`src/supermimic/robots/rov
 
 ## 1. 重定向（狗动作 → 你的机器人）
 
-支持的结构：12 自由度四足，MJCF 里有自由浮动的机身，每条腿依次是：在髋部 body 原点、绕 +x 的外展关节；相对它只有横向偏移、
-绕 +y 的大腿关节；在大腿关节正下方、绕 +y 的小腿关节；以及小腿关节正下方的足端 site（Rover X1、Unitree Go1 / Go2 / A1
-等大多数机器狗都是这样）。`load_robot` 会逐项检查，不符合时会指出是哪个关节或 site。
+支持的结构：12 自由度四足，MJCF 里有自由浮动的机身，每条腿依次是：在髋部 body 原点、绕 +x 的外展关节；
+相对它可以有固定前后、横向和高度偏移、绕 +y 的大腿关节；在大腿关节正下方、绕 +y 的小腿关节；
+以及在小腿关节下方、允许横向偏移但不允许前后偏移的足端 site。Rover X1、Unitree Go1 / Go2 / A1
+和本项目迁移的 CAD dog 都符合这些约束。`load_robot` 会逐项检查，不符合时会指出是哪个关节或 site。
 
 新建 `configs/robots/<name>.yaml`：
 

@@ -6,9 +6,9 @@ changes the numbers here too. Supported legs (most 12-DoF quadrupeds: Rover X1, 
 ...), checked when the model is loaded:
 
     abad    hinge about +x at the hip body origin
-    thigh   hinge about +y, its body offset from the hip body only sideways (0, +-d, 0)
+    thigh   hinge about +y; its body may have a fixed x/y/z offset from the hip
     calf    hinge about +y, its body straight below the thigh joint (0, 0, -l_thigh)
-    foot    a site straight below the calf joint (0, 0, -l_calf); a sphere geom gives its radius
+    foot    a site below the calf joint with a possible lateral offset (0, d, -l_calf)
 
 **Knee direction.** ``knee_sign`` picks the IK branch: -1 = calf < 0, knees pointing backwards on
 every leg (Rover X1, Go1 and most Unitree dogs).
@@ -41,10 +41,13 @@ class LegGeometry:
     thigh_offset: float  # signed lateral offset of the thigh joint from the abad joint
     l_thigh: float
     l_calf: float  # calf joint -> foot centre
+    thigh_offset_x: float = 0.0
+    thigh_offset_z: float = 0.0
+    foot_lateral: float = 0.0
 
     @property
     def thigh_pos(self) -> np.ndarray:
-        return self.abad_pos + np.array([0.0, self.thigh_offset, 0.0])
+        return self.abad_pos + np.array([self.thigh_offset_x, self.thigh_offset, self.thigh_offset_z])
 
 
 @dataclass(frozen=True)
@@ -77,7 +80,7 @@ class Quadruped:
         thigh = self.stance[0] if thigh is None else thigh
         calf = self.stance[1] if calf is None else calf
         g = self.legs["FL"]
-        z = g.l_thigh * np.cos(thigh) + g.l_calf * np.cos(thigh + calf)
+        z = -g.abad_pos[2] - g.thigh_offset_z + g.l_thigh * np.cos(thigh) + g.l_calf * np.cos(thigh + calf)
         return float(z + self.foot_radius)
 
 
@@ -134,14 +137,16 @@ def load_robot(name_or_path: str | Path = "rover") -> Quadruped:
         site = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, site_name)
         assert site >= 0, f"{cfg_path.name}: no site {site_name!r}"
         assert model.site_bodyid[site] == calf_b, f"{l}: foot site must be on the calf body"
-        assert np.allclose(model.body_pos[thigh_b][[0, 2]], 0), f"{l}: thigh body offset must be sideways only"
         assert np.allclose(model.body_pos[calf_b][:2], 0), f"{l}: calf body must sit straight below the thigh joint"
-        assert np.allclose(model.site_pos[site][:2], 0), f"{l}: foot site must sit straight below the calf joint"
+        assert np.isclose(model.site_pos[site][0], 0), f"{l}: foot site must have zero fore-aft offset"
         legs[l] = LegGeometry(
             abad_pos=model.body_pos[hip_b].copy(),
             thigh_offset=float(model.body_pos[thigh_b][1]),
             l_thigh=float(-model.body_pos[calf_b][2]),
             l_calf=float(-model.site_pos[site][2]),
+            thigh_offset_x=float(model.body_pos[thigh_b][0]),
+            thigh_offset_z=float(model.body_pos[thigh_b][2]),
+            foot_lateral=float(model.site_pos[site][1]),
         )
         leg_q[l] = np.array([joint_names.index(n) for n in (abad, thigh, calf)])
         sites.append(site_name)
@@ -186,9 +191,9 @@ def load_robot(name_or_path: str | Path = "rover") -> Quadruped:
 def leg_fk(g: LegGeometry, q: np.ndarray) -> np.ndarray:
     """Foot centre in the trunk frame for joint angles q (..., 3) = (abad, thigh, calf)."""
     q1, q2, q3 = q[..., 0], q[..., 1], q[..., 2]
-    x = -g.l_thigh * np.sin(q2) - g.l_calf * np.sin(q2 + q3)
-    z = -g.l_thigh * np.cos(q2) - g.l_calf * np.cos(q2 + q3)
-    y = np.full_like(x, g.thigh_offset)
+    x = g.thigh_offset_x - g.l_thigh * np.sin(q2) - g.l_calf * np.sin(q2 + q3)
+    z = g.thigh_offset_z - g.l_thigh * np.cos(q2) - g.l_calf * np.cos(q2 + q3)
+    y = np.full_like(x, g.thigh_offset + g.foot_lateral)
     c, s = np.cos(q1), np.sin(q1)
     return np.stack([x, y * c - z * s, y * s + z * c], -1) + g.abad_pos
 
@@ -196,8 +201,8 @@ def leg_fk(g: LegGeometry, q: np.ndarray) -> np.ndarray:
 def knee_pos(g: LegGeometry, q: np.ndarray) -> np.ndarray:
     """Calf joint (knee) in the trunk frame."""
     q1, q2 = q[..., 0], q[..., 1]
-    x = -g.l_thigh * np.sin(q2)
-    z = -g.l_thigh * np.cos(q2)
+    x = g.thigh_offset_x - g.l_thigh * np.sin(q2)
+    z = g.thigh_offset_z - g.l_thigh * np.cos(q2)
     y = np.full_like(x, g.thigh_offset)
     c, s = np.cos(q1), np.sin(q1)
     return np.stack([x, y * c - z * s, y * s + z * c], -1) + g.abad_pos
@@ -206,13 +211,14 @@ def knee_pos(g: LegGeometry, q: np.ndarray) -> np.ndarray:
 def leg_ik_branches(g: LegGeometry, p: np.ndarray, knee_sign: float = -1.0) -> tuple[np.ndarray, np.ndarray]:
     """Both abad branches for foot targets p (..., 3): (foot below the thigh joint, foot above)."""
     r = p - g.abad_pos
-    px, py, pz = r[..., 0], r[..., 1], r[..., 2]
-    d = g.thigh_offset
+    px, py, pz = r[..., 0] - g.thigh_offset_x, r[..., 1], r[..., 2]
+    d = g.thigh_offset + g.foot_lateral
     zz_abs = np.sqrt(np.maximum(py**2 + pz**2 - d * d, 1e-12))
     wrap = lambda a: (a + np.pi) % (2 * np.pi) - np.pi  # noqa: E731
     out = []
     for zz in (-zz_abs, zz_abs):
         q1 = wrap(np.arctan2(pz, py) - np.arctan2(zz, d))
+        zz -= g.thigh_offset_z
         l1, l2 = g.l_thigh, g.l_calf
         c3 = np.clip((px**2 + zz**2 - l1 * l1 - l2 * l2) / (2 * l1 * l2), -1.0, 1.0)
         q3 = knee_sign * np.arccos(c3)
@@ -229,8 +235,8 @@ def leg_ik(g: LegGeometry, p: np.ndarray, abad_limit: float, knee_sign: float = 
     residual with ``leg_fk`` and decides whether the frame is usable.
     """
     r = p - g.abad_pos
-    px, py, pz = r[..., 0], r[..., 1], r[..., 2]
-    d = g.thigh_offset
+    px, py, pz = r[..., 0] - g.thigh_offset_x, r[..., 1], r[..., 2]
+    d = g.thigh_offset + g.foot_lateral
     rho2 = py**2 + pz**2
     # In the abad-rotated frame the foot is at (d, zz); zz < 0 is the foot below the thigh joint,
     # zz > 0 a leg swung up past horizontal (a raised paw). Both can reach the same point. We take
@@ -242,7 +248,7 @@ def leg_ik(g: LegGeometry, p: np.ndarray, abad_limit: float, knee_sign: float = 
     q1_up = wrap(np.arctan2(pz, py) - np.arctan2(zz_abs, d))
     up = (np.abs(q1_dn) > abad_limit) & (np.abs(q1_up) < np.abs(q1_dn))
     q1 = np.where(up, q1_up, q1_dn)
-    zz = np.where(up, zz_abs, -zz_abs)
+    zz = np.where(up, zz_abs, -zz_abs) - g.thigh_offset_z
     L2 = px**2 + zz**2
     l1, l2 = g.l_thigh, g.l_calf
     c3 = np.clip((L2 - l1 * l1 - l2 * l2) / (2 * l1 * l2), -1.0, 1.0)

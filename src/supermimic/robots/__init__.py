@@ -14,6 +14,7 @@ __all__ = ["RobotSpec", "StateScales", "ObsNoise", "DomainRandomization", "Reset
 ROBOTS: dict[str, str] = {
     "g1": "supermimic.robots.g1:g1_spec",
     "rover": "supermimic.robots.rover:rover_spec",
+    "dog": "supermimic.robots.dog:dog_spec",
 }
 ROBOT_NAMES = tuple(ROBOTS)
 _CACHE: dict[str, RobotSpec] = {}

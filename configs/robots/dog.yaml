@@ -1,0 +1,12 @@
+xml: src/supermimic/robots/assets/dog/dog.xml
+root_body: trunk
+legs:
+  FL: [FL_hip_joint, FL_thigh_joint, FL_calf_joint, FL]
+  FR: [FR_hip_joint, FR_thigh_joint, FR_calf_joint, FR]
+  RL: [RL_hip_joint, RL_thigh_joint, RL_calf_joint, RL]
+  RR: [RR_hip_joint, RR_thigh_joint, RR_calf_joint, RR]
+geoms:
+  foot: FL_foot_collision
+  trunk: trunk_collision
+knee_sign: -1
+stance: [0.5292036732051035, -1.481744357468247]
